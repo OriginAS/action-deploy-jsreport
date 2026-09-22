@@ -1,0 +1,187 @@
+name: 'Deploy jsreport templates'
+description: 'Imports a jsreport export file into a jsreport instance, over SSH'
+author: 'gskjold'
+inputs:
+  export-file:
+    description: 'The .jsrexport (or .zip) file produced by `jsreport export`'
+    required: true
+  server-host:
+    description: 'Host name of the server jsreport runs on'
+    required: true
+  server-ssh-key:
+    description: 'SSH private key that can access the server'
+    required: true
+  server-user:
+    description: 'User to connect to the server as'
+    required: false
+    default: 'actions'
+  jsreport-url:
+    description: 'Base URL of the jsreport instance, as seen from the server itself'
+    required: false
+    default: 'http://localhost:5488'
+  jsreport-user:
+    description: 'jsreport username, if the authentication extension is enabled'
+    required: false
+    default: ''
+  jsreport-password:
+    description: 'jsreport password, if the authentication extension is enabled'
+    required: false
+    default: ''
+  full-import:
+    description: >-
+      Mirror the instance on the export file: entities missing from the file are deleted.
+      Set to false to merge, which only creates and updates. Cannot be combined with target-folder.
+    required: false
+    default: 'true'
+  target-folder:
+    description: 'Shortid of a folder to import into, instead of the instance root'
+    required: false
+    default: ''
+  aws-access-key-id:
+    description: 'AWS access key, if the server sits behind a security group this action must open'
+    required: false
+    default: ''
+  aws-secret-access-key:
+    description: 'AWS access key secret'
+    required: false
+    default: ''
+  aws-security-group-id:
+    description: 'The ID of the security group to allow SSH access from this action. Leave empty to skip'
+    required: false
+    default: ''
+  aws-region:
+    description: 'AWS region the security group lives in'
+    required: false
+    default: 'eu-north-1'
+runs:
+  using: 'composite'
+  steps:
+    - name: Validate inputs
+      shell: bash
+      env:
+        EXPORT_FILE: ${{ inputs.export-file }}
+        FULL_IMPORT: ${{ inputs.full-import }}
+        TARGET_FOLDER: ${{ inputs.target-folder }}
+        AWS_SG: ${{ inputs.aws-security-group-id }}
+        AWS_KEY: ${{ inputs.aws-access-key-id }}
+      run: |
+        if [ ! -f "$EXPORT_FILE" ]; then
+          echo "::error::export-file '$EXPORT_FILE' does not exist"
+          exit 1
+        fi
+        if [ "$FULL_IMPORT" = "true" ] && [ -n "$TARGET_FOLDER" ]; then
+          echo "::error::full-import and target-folder are mutually exclusive"
+          exit 1
+        fi
+        if [ -n "$AWS_SG" ] && [ -z "$AWS_KEY" ]; then
+          echo "::error::aws-security-group-id needs aws-access-key-id and aws-secret-access-key"
+          exit 1
+        fi
+
+    - name: Get runner ip address
+      id: ip
+      if: inputs.aws-security-group-id != ''
+      shell: bash
+      run: echo "ipv4=$(curl -4 -s https://checkip.amazonaws.com)" >> $GITHUB_OUTPUT
+
+    - uses: aws-actions/configure-aws-credentials@v6
+      if: inputs.aws-security-group-id != ''
+      with:
+        aws-access-key-id: ${{ inputs.aws-access-key-id }}
+        aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
+        aws-region: ${{ inputs.aws-region }}
+
+    - name: Whitelist runner IP address
+      if: inputs.aws-security-group-id != ''
+      shell: bash
+      env:
+        AWS_SG: ${{ inputs.aws-security-group-id }}
+        RUNNER_IP: ${{ steps.ip.outputs.ipv4 }}
+      run: |
+        aws ec2 authorize-security-group-ingress \
+          --group-id "$AWS_SG" --protocol tcp --port 22 --cidr "$RUNNER_IP/32"
+
+    # The import runs on the server: jsreport normally listens on localhost only,
+    # so there is no port to open beyond the SSH one we already have.
+    - name: Import templates into jsreport
+      shell: bash
+      env:
+        SSH_KEY: ${{ inputs.server-ssh-key }}
+        SERVER_USER: ${{ inputs.server-user }}
+        SERVER_HOST: ${{ inputs.server-host }}
+        EXPORT_FILE: ${{ inputs.export-file }}
+        JSREPORT_URL: ${{ inputs.jsreport-url }}
+        JSREPORT_USER: ${{ inputs.jsreport-user }}
+        JSREPORT_PASSWORD: ${{ inputs.jsreport-password }}
+        FULL_IMPORT: ${{ inputs.full-import }}
+        TARGET_FOLDER: ${{ inputs.target-folder }}
+      run: |
+        set -euo pipefail
+
+        printf '%s\n' "$SSH_KEY" > "$RUNNER_TEMP/jsreport_deploy_key"
+        chmod 600 "$RUNNER_TEMP/jsreport_deploy_key"
+        TARGET="$SERVER_USER@$SERVER_HOST"
+        REMOTE_FILE="work/jsreport-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.jsrexport"
+
+        if [ "$FULL_IMPORT" = "true" ]; then
+          QUERY="fullImport=true"
+        elif [ -n "$TARGET_FOLDER" ]; then
+          QUERY="targetFolder=$TARGET_FOLDER"
+        else
+          QUERY=""
+        fi
+
+        ssh_run() {
+          ssh -o StrictHostKeyChecking=no -i "$RUNNER_TEMP/jsreport_deploy_key" "$TARGET" "$@"
+        }
+
+        echo "Uploading $(basename "$EXPORT_FILE") to $TARGET"
+        ssh_run "mkdir -p work"
+        scp -o StrictHostKeyChecking=no -i "$RUNNER_TEMP/jsreport_deploy_key" \
+          "$EXPORT_FILE" "$TARGET:$REMOTE_FILE"
+
+        # A full import deletes before it inserts, but the whole thing is transactional:
+        # if it fails, the instance is left with what it had.
+        echo "Importing into $JSREPORT_URL ($QUERY)"
+        CURL="curl -sS --fail-with-body -F 'import.zip=@$REMOTE_FILE' '$JSREPORT_URL/api/import?$QUERY'"
+        STATUS=0
+        if [ -n "$JSREPORT_USER" ]; then
+          # credentials go over stdin so they never appear in the server's process list
+          printf 'user = "%s:%s"\n' "$JSREPORT_USER" "$JSREPORT_PASSWORD" \
+            | ssh_run "$CURL --config -" || STATUS=$?
+        else
+          ssh_run "$CURL" || STATUS=$?
+        fi
+        echo
+        ssh_run "rm -f $REMOTE_FILE" || true
+        if [ "$STATUS" -ne 0 ]; then
+          echo "::error::Import failed"
+          exit "$STATUS"
+        fi
+
+    - name: Verify jsreport is answering
+      shell: bash
+      env:
+        SERVER_USER: ${{ inputs.server-user }}
+        SERVER_HOST: ${{ inputs.server-host }}
+        JSREPORT_URL: ${{ inputs.jsreport-url }}
+      run: |
+        set -euo pipefail
+        ssh -o StrictHostKeyChecking=no -i "$RUNNER_TEMP/jsreport_deploy_key" \
+          "$SERVER_USER@$SERVER_HOST" "curl -sS --fail-with-body '$JSREPORT_URL/api/ping'"
+        echo
+
+    - name: Remove deploy key
+      if: always()
+      shell: bash
+      run: rm -f "$RUNNER_TEMP/jsreport_deploy_key"
+
+    - name: Revoke runner IP address
+      if: always() && inputs.aws-security-group-id != '' && steps.ip.outputs.ipv4 != ''
+      shell: bash
+      env:
+        AWS_SG: ${{ inputs.aws-security-group-id }}
+        RUNNER_IP: ${{ steps.ip.outputs.ipv4 }}
+      run: |
+        aws ec2 revoke-security-group-ingress \
+          --group-id "$AWS_SG" --protocol tcp --port 22 --cidr "$RUNNER_IP/32"
