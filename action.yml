@@ -37,12 +37,16 @@ inputs:
     description: 'Shortid of a folder to import into, instead of the instance root'
     required: false
     default: ''
+  aws-role-arn:
+    description: 'IAM role assumed through GitHub OIDC. The calling job needs `permissions: id-token: write`'
+    required: false
+    default: 'arn:aws:iam::835337142747:role/github-deploy'
   aws-access-key-id:
-    description: 'AWS access key, if the server sits behind a security group this action must open'
+    description: 'Deprecated: only used when the calling job does not grant id-token: write'
     required: false
     default: ''
   aws-secret-access-key:
-    description: 'AWS access key secret'
+    description: 'Deprecated: see aws-access-key-id'
     required: false
     default: ''
   aws-security-group-id:
@@ -73,8 +77,8 @@ runs:
           echo "::error::full-import and target-folder are mutually exclusive"
           exit 1
         fi
-        if [ -n "$AWS_SG" ] && [ -z "$AWS_KEY" ]; then
-          echo "::error::aws-security-group-id needs aws-access-key-id and aws-secret-access-key"
+        if [ -n "$AWS_SG" ] && [ -z "$AWS_KEY" ] && [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+          echo "::error::aws-security-group-id needs permissions: id-token: write on the calling job"
           exit 1
         fi
 
@@ -84,8 +88,20 @@ runs:
       shell: bash
       run: echo "ipv4=$(curl -4 -s https://checkip.amazonaws.com)" >> $GITHUB_OUTPUT
 
-    - uses: aws-actions/configure-aws-credentials@v6
-      if: inputs.aws-security-group-id != ''
+    - name: Check for GitHub OIDC token
+      id: oidc
+      shell: bash
+      run: echo "available=$([ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] && echo true || echo false)" >> $GITHUB_OUTPUT
+    - name: Configure AWS credentials (OIDC)
+      if: inputs.aws-security-group-id != '' && steps.oidc.outputs.available == 'true'
+      uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+      with:
+        role-to-assume: ${{ inputs.aws-role-arn }}
+        role-session-name: ${{ github.event.repository.name || 'github-actions' }}
+        aws-region: ${{ inputs.aws-region }}
+    - name: Configure AWS credentials (access key, deprecated)
+      if: inputs.aws-security-group-id != '' && steps.oidc.outputs.available != 'true'
+      uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
       with:
         aws-access-key-id: ${{ inputs.aws-access-key-id }}
         aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
