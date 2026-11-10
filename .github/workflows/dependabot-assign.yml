@@ -1,0 +1,25 @@
+name: Dependabot assign
+
+# Starts only when a label is added. Dependabot adds "dependencies" right
+# after opening its PRs; normal human PRs get no label, so no run at all.
+on:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+jobs:
+  assign:
+    if: >-
+      github.event.label.name == 'dependencies' &&
+      github.event.pull_request.user.login == 'dependabot[bot]'
+    permissions:
+      contents: read        # read the commit history
+      issues: write         # add assignees (PRs are issues in the API)
+      pull-requests: write  # request reviewers
+    uses: OriginAS/origin-actions/.github/workflows/dependabot-assign.yml@main
+    with:
+      count: 2
+      days: 90
+      mode: assign
