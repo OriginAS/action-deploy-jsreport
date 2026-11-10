@@ -1,0 +1,16 @@
+# Dependabot version updates.
+# - No auto-merge: every PR is reviewed and merged by a person.
+# - No `ignore` on semver-major: ignore rules also suppress security updates.
+#   Majors are kept apart from minor/patch by groups instead.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
