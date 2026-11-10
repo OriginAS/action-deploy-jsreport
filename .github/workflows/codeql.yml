@@ -25,5 +25,5 @@ jobs:
       actions: read
       contents: read
       security-events: write
-    uses: OriginAS/origin-actions/.github/workflows/codeql.yml@main
+    uses: OriginAS/origin-actions/.github/workflows/codeql.yml@f72ac0ab464a0462cef5cd7eca7f562206c26edf # main
     secrets: inherit

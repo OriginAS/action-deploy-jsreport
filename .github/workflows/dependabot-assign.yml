@@ -18,7 +18,7 @@ jobs:
       contents: read        # read the commit history
       issues: write         # add assignees (PRs are issues in the API)
       pull-requests: write  # request reviewers
-    uses: OriginAS/origin-actions/.github/workflows/dependabot-assign.yml@main
+    uses: OriginAS/origin-actions/.github/workflows/dependabot-assign.yml@f72ac0ab464a0462cef5cd7eca7f562206c26edf # main
     with:
       count: 2
       days: 90
